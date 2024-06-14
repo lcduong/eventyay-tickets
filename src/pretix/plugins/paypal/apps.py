@@ -14,10 +14,16 @@ class PaypalApp(AppConfig):
         author = _("the pretix team")
         version = version
         category = 'PAYMENT'
-        description = _("This plugin allows you to receive payments via PayPal")
+        featured = True
+        picture = 'pretixplugins/paypal/paypal_logo.svg'
+        description = _("Accept payments with your PayPal account. PayPal is one of the most popular payment methods "
+                        "world-wide.")
 
     def ready(self):
         from . import signals  # NOQA
+
+    def is_available(self, event):
+        return 'pretix.plugins.paypal' in event.plugins.split(',')
 
     @cached_property
     def compatibility_errors(self):
@@ -27,6 +33,3 @@ class PaypalApp(AppConfig):
         except ImportError:
             errs.append("Python package 'paypalrestsdk' is not installed.")
         return errs
-
-
-default_app_config = 'pretix.plugins.paypal.PaypalApp'

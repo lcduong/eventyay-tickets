@@ -61,7 +61,7 @@ class CartMixin:
     def invoice_address(self):
         return cached_invoice_address(self.request)
 
-    def get_cart(self, answers=False, queryset=None, order=None, downloads=False):
+    def get_cart(self, answers=False, queryset=None, order=None, downloads=False, payments=None):
         if queryset is not None:
             prefetch = []
             if answers:
@@ -170,7 +170,8 @@ class CartMixin:
             fees = order.fees.all()
         elif positions:
             fees = get_fees(
-                self.request.event, self.request, total, self.invoice_address, self.cart_session.get('payment'),
+                self.request.event, self.request, total, self.invoice_address,
+                payments if payments is not None else self.cart_session.get('payments', []),
                 cartpos
             )
         else:
