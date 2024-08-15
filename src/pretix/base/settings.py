@@ -26,7 +26,7 @@ from pretix.api.serializers.fields import (
     ListMultipleChoiceField, UploadedFileField,
 )
 from pretix.api.serializers.i18n import I18nField, I18nURLField
-from pretix.base.forms import I18nURLFormField, I18nMarkdownTextarea
+from pretix.base.forms import I18nURLFormField
 from pretix.base.models.tax import TaxRule
 from pretix.base.reldate import (
     RelativeDateField, RelativeDateTimeField, RelativeDateWrapper,

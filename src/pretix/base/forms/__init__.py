@@ -156,7 +156,7 @@ class SecretKeySettingsField(forms.CharField):
         return super().run_validators(value)
 
 
-class MarkdownTextType(i18nfield.forms.I18nTextarea):
+class I18nMarkdownTextarea(i18nfield.forms.I18nTextarea):
 
     def create_markdown_note(self):
         return '<div class="i18n-field-markdown-note">%s</div>' % (
