@@ -36,7 +36,6 @@ RUN apt-get update && \
 ENV LC_ALL=C.UTF-8 \
     DJANGO_SETTINGS_MODULE=production_settings
 ARG GITHUB_TOKEN
-
 ENV GITHUB_TOKEN=$GITHUB_TOKEN
 
 COPY deployment/docker/pretix.bash /usr/local/bin/pretix
