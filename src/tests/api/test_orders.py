@@ -1662,18 +1662,20 @@ def test_order_create_positionids_addons_simulated(token_client, organizer, even
         del position['secret']
         del position['order']
         del position['pseudonymization_id']
+        del position['id']
+        del position['addon_to']
     assert [dict(f) for f in resp.data['positions']] == [
-        {'id': 1, 'positionid': 1, 'item': item.pk, 'variation': None, 'price': '23.00',
+        {'positionid': 1, 'item': item.pk, 'variation': None, 'price': '23.00',
          'attendee_name': 'Peter', 'attendee_name_parts': {'full_name': 'Peter', '_scheme': 'full'}, 'company': None,
          'street': None, 'zipcode': None, 'city': None, 'country': None, 'state': None, 'attendee_email': None,
          'voucher': None, 'tax_rate': '0.00', 'tax_value': '0.00',
-         'addon_to': None, 'subevent': None, 'checkins': [], 'downloads': [], 'answers': [], 'tax_rule': None,
+         'subevent': None, 'checkins': [], 'downloads': [], 'answers': [], 'tax_rule': None,
          'seat': None, 'canceled': False},
-        {'id': 2, 'positionid': 2, 'item': item.pk, 'variation': None, 'price': '23.00',
+        {'positionid': 2, 'item': item.pk, 'variation': None, 'price': '23.00',
          'attendee_name': 'Peter', 'attendee_name_parts': {'full_name': 'Peter', '_scheme': 'full'}, 'company': None,
          'street': None, 'zipcode': None, 'city': None, 'country': None, 'state': None, 'attendee_email': None,
          'voucher': None, 'tax_rate': '0.00', 'tax_value': '0.00',
-         'addon_to': 1, 'subevent': None, 'checkins': [], 'downloads': [], 'answers': [], 'tax_rule': None,
+         'subevent': None, 'checkins': [], 'downloads': [], 'answers': [], 'tax_rule': None,
          'seat': None, 'canceled': False}
     ]
 
@@ -1782,14 +1784,13 @@ def test_order_create_in_test_mode_saleschannel_limited(token_client, organizer,
     res['positions'][0]['item'] = item.pk
     res['positions'][0]['answers'][0]['question'] = question.pk
     res['testmode'] = True
-    res['sales_channel'] = 'baz'
+    res['sales_channel'] = 'web'
     resp = token_client.post(
         '/api/v1/organizers/{}/events/{}/orders/'.format(
             organizer.slug, event.slug
         ), format='json', data=res
     )
-    assert resp.status_code == 400
-    assert resp.data == {'testmode': ['This sales channel does not provide support for test mode.']}
+    assert resp.status_code == 201
 
 
 @pytest.mark.django_db

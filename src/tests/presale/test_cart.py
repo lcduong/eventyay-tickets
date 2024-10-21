@@ -294,6 +294,31 @@ class CartTest(CartTestMixin, TestCase):
             objs = list(CartPosition.objects.filter(cart_id=self.session_key, event=self.event))
         self.assertEqual(len(objs), 0)
 
+    def test_voucher_ignore_if_Redeemed(self):
+        with scopes_disabled():
+            v = Voucher.objects.create(item=self.ticket, event=self.event, max_usages=2)
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'item_%d' % self.ticket.id: '1',
+            '_voucher_code': v.code,
+            '_voucher_ignore_if_redeemed': 'on',
+        }, follow=True)
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'item_%d' % self.ticket.id: '1',
+            '_voucher_code': v.code,
+            '_voucher_ignore_if_redeemed': 'on',
+        }, follow=True)
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'item_%d' % self.ticket.id: '1',
+            '_voucher_code': v.code,
+            '_voucher_ignore_if_redeemed': 'on',
+        }, follow=True)
+        with scopes_disabled():
+            objs = list(CartPosition.objects.filter(cart_id=self.session_key, event=self.event).order_by('id'))
+        self.assertEqual(len(objs), 3)
+        self.assertEqual(objs[0].voucher, v)
+        self.assertEqual(objs[1].voucher, v)
+        self.assertIsNone(objs[2].voucher)
+
     def test_voucher_subevent(self):
         self.event.has_subevents = True
         self.event.save()
@@ -520,6 +545,22 @@ class CartTest(CartTestMixin, TestCase):
             objs = list(CartPosition.objects.filter(cart_id=self.session_key, event=self.event))
         self.assertEqual(len(objs), 0)
 
+    def test_subevent_availability(self):
+        self.event.has_subevents = True
+        self.event.save()
+        with scopes_disabled():
+            se = self.event.subevents.create(name='Foo', date_from=now(), active=True)
+            q = se.quotas.create(name="foo", size=None, event=self.event)
+            q.items.add(self.ticket)
+            SubEventItem.objects.create(subevent=se, item=self.ticket, price=42, available_until=now() - timedelta(hours=1))
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'item_%d' % self.ticket.id: '1',
+            'subevent': se.pk
+        }, follow=False)
+        with scopes_disabled():
+            objs = list(CartPosition.objects.filter(cart_id=self.session_key, event=self.event))
+        self.assertEqual(len(objs), 0)
+
     def test_subevent_price(self):
         self.event.has_subevents = True
         self.event.save()
@@ -560,6 +601,21 @@ class CartTest(CartTestMixin, TestCase):
         self.assertEqual(objs[0].item, self.ticket)
         self.assertIsNone(objs[0].variation)
         self.assertEqual(objs[0].price, 24)
+
+    def test_free_price_numeric(self):
+        self.ticket.free_price = True
+        self.ticket.save()
+        response = self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'item_%d' % self.ticket.id: '1',
+            'price_%d' % self.ticket.id: 'abcde'
+        }, follow=True)
+        self.assertRedirects(response, '/%s/%s/?require_cookie=true' % (self.orga.slug, self.event.slug),
+                             target_status_code=200)
+        doc = BeautifulSoup(response.rendered_content, "lxml")
+        self.assertIn('not a number', doc.select('#error-message')[0].text)
+        with scopes_disabled():
+            objs = list(CartPosition.objects.filter(cart_id=self.session_key, event=self.event))
+        self.assertEqual(len(objs), 0)
 
     def test_free_price_only_if_allowed(self):
         self.ticket.free_price = False
@@ -664,6 +720,22 @@ class CartTest(CartTestMixin, TestCase):
             q = se.quotas.create(name="foo", size=None, event=self.event)
             q.variations.add(self.shirt_red)
             SubEventItemVariation.objects.create(subevent=se, variation=self.shirt_red, price=42, disabled=True)
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'variation_%d_%d' % (self.shirt.id, self.shirt_red.id): '1',
+            'subevent': se.pk
+        }, follow=False)
+        with scopes_disabled():
+            objs = list(CartPosition.objects.filter(cart_id=self.session_key, event=self.event))
+        self.assertEqual(len(objs), 0)
+
+    def test_subevent_variation_availability(self):
+        self.event.has_subevents = True
+        self.event.save()
+        with scopes_disabled():
+            se = self.event.subevents.create(name='Foo', date_from=now(), active=True)
+            q = se.quotas.create(name="foo", size=None, event=self.event)
+            q.variations.add(self.shirt_red)
+            SubEventItemVariation.objects.create(subevent=se, variation=self.shirt_red, price=42, available_from=now() + timedelta(hours=1))
         self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
             'variation_%d_%d' % (self.shirt.id, self.shirt_red.id): '1',
             'subevent': se.pk
@@ -806,20 +878,47 @@ class CartTest(CartTestMixin, TestCase):
             self.assertFalse(CartPosition.objects.filter(cart_id=self.session_key, event=self.event).exists())
 
     def test_wrong_sales_channel(self):
-        self.ticket.sales_channels = ['bar']
-        self.ticket.save()
+        with scopes_disabled():
+            self.ticket.all_sales_channels = False
+            self.ticket.limit_sales_channels.add(self.orga.sales_channels.get(identifier="bar"))
+            self.ticket.save()
         self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
             'item_%d' % self.ticket.id: '1',
         }, follow=True)
         with scopes_disabled():
             self.assertEqual(CartPosition.objects.filter(cart_id=self.session_key, event=self.event).count(), 0)
 
+    def test_variation_wrong_sales_channel(self):
+        with scopes_disabled():
+            self.shirt_blue.all_sales_channels = False
+            self.shirt_blue.limit_sales_channels.add(self.orga.sales_channels.get(identifier="bar"))
+            self.shirt_blue.save()
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'variation_%d_%d' % (self.shirt.id, self.shirt_blue.id): '1',
+        }, follow=True)
+        with scopes_disabled():
+            self.assertEqual(CartPosition.objects.filter(cart_id=self.session_key, event=self.event).count(), 0)
+            self.shirt_blue.all_sales_channels = False
+            self.shirt_blue.limit_sales_channels.add(self.orga.sales_channels.get(identifier="bar"))
+            self.shirt_blue.limit_sales_channels.add(self.orga.sales_channels.get(identifier="web"))
+            self.shirt_blue.save()
+            self.shirt.all_sales_channels = False
+            self.shirt.limit_sales_channels.add(self.orga.sales_channels.get(identifier="bar"))
+            self.shirt.save()
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'variation_%d_%d' % (self.shirt.id, self.shirt_blue.id): '1',
+        }, follow=True)
+        with scopes_disabled():
+            self.assertEqual(CartPosition.objects.filter(cart_id=self.session_key, event=self.event).count(), 0)
+
     def test_other_sales_channel(self):
-        self.ticket.sales_channels = ['bar']
-        self.ticket.save()
+        with scopes_disabled():
+            self.ticket.all_sales_channels = False
+            self.ticket.limit_sales_channels.add(self.orga.sales_channels.get(identifier="bar"))
+            self.ticket.save()
         self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
             'item_%d' % self.ticket.id: '1',
-        }, follow=True, PRETIX_SALES_CHANNEL=FoobarSalesChannel)
+        }, follow=True, PRETIX_SALES_CHANNEL=FoobarSalesChannel.identifier)
         with scopes_disabled():
             self.assertEqual(CartPosition.objects.filter(cart_id=self.session_key, event=self.event).count(), 1)
 
@@ -868,6 +967,23 @@ class CartTest(CartTestMixin, TestCase):
         with scopes_disabled():
             self.assertEqual(CartPosition.objects.filter(cart_id=self.session_key, event=self.event).count(), 1)
 
+    def test_max_items_global(self):
+        with scopes_disabled():
+            CartPosition.objects.create(
+                event=self.event, cart_id=self.session_key, item=self.ticket,
+                price=23, expires=now() + timedelta(minutes=10)
+            )
+        self.event.settings.max_items_per_order = settings.PRETIX_MAX_ORDER_SIZE + 100
+        response = self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'item_%d' % self.ticket.id: str(settings.PRETIX_MAX_ORDER_SIZE + 1),
+        }, follow=True)
+        self.assertRedirects(response, '/%s/%s/?require_cookie=true' % (self.orga.slug, self.event.slug),
+                             target_status_code=200)
+        doc = BeautifulSoup(response.rendered_content, "lxml")
+        self.assertIn('more than', doc.select('.alert-danger')[0].text)
+        with scopes_disabled():
+            self.assertEqual(CartPosition.objects.filter(cart_id=self.session_key, event=self.event).count(), 1)
+
     def test_max_items_unlimited_sales_channel(self):
         with scopes_disabled():
             CartPosition.objects.create(
@@ -877,13 +993,13 @@ class CartTest(CartTestMixin, TestCase):
         self.event.settings.max_items_per_order = 5
         response = self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
             'item_%d' % self.ticket.id: '5',
-        }, follow=True, PRETIX_SALES_CHANNEL=FoobarSalesChannel)
+        }, follow=True, PRETIX_SALES_CHANNEL=FoobarSalesChannel.identifier)
         self.assertRedirects(response, '/%s/%s/?require_cookie=true' % (self.orga.slug, self.event.slug),
                              target_status_code=200)
         doc = BeautifulSoup(response.rendered_content, "lxml")
         self.assertNotIn('more than', doc.select('.alert-danger')[0].text)
         with scopes_disabled():
-            self.assertEqual(CartPosition.objects.filter(cart_id=self.session_key, event=self.event).count(), 1)
+            self.assertEqual(CartPosition.objects.filter(cart_id=self.session_key, event=self.event).count(), 5)
 
     def test_max_per_item_variations_failed(self):
         self.shirt.max_per_order = 1
@@ -896,6 +1012,34 @@ class CartTest(CartTestMixin, TestCase):
                              target_status_code=200)
         doc = BeautifulSoup(response.rendered_content, "lxml")
         self.assertIn('more than', doc.select('.alert-danger')[0].text)
+        with scopes_disabled():
+            self.assertEqual(CartPosition.objects.filter(cart_id=self.session_key, event=self.event).count(), 0)
+
+    def test_variation_in_time_available(self):
+        self.shirt_blue.available_until = now() + timedelta(days=2)
+        self.shirt_blue.available_from = now() - timedelta(days=2)
+        self.shirt_blue.save()
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'variation_%d_%d' % (self.shirt.id, self.shirt_blue.id): '1',
+        }, follow=True)
+        with scopes_disabled():
+            self.assertEqual(CartPosition.objects.filter(cart_id=self.session_key, event=self.event).count(), 1)
+
+    def test_variation_no_longer_available(self):
+        self.shirt_blue.available_until = now() - timedelta(days=2)
+        self.shirt_blue.save()
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'variation_%d_%d' % (self.shirt.id, self.shirt_blue.id): '1',
+        }, follow=True)
+        with scopes_disabled():
+            self.assertEqual(CartPosition.objects.filter(cart_id=self.session_key, event=self.event).count(), 0)
+
+    def test_variation_not_yet_available(self):
+        self.shirt_blue.available_from = now() + timedelta(days=2)
+        self.shirt_blue.save()
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'variation_%d_%d' % (self.shirt.id, self.shirt_blue.id): '1',
+        }, follow=True)
         with scopes_disabled():
             self.assertEqual(CartPosition.objects.filter(cart_id=self.session_key, event=self.event).count(), 0)
 
@@ -1170,6 +1314,35 @@ class CartTest(CartTestMixin, TestCase):
         with scopes_disabled():
             self.assertFalse(CartPosition.objects.filter(cart_id=self.session_key, event=self.event).exists())
 
+    def test_remove_voucher_min_usages(self):
+        with scopes_disabled():
+            v = Voucher.objects.create(item=self.ticket, value=Decimal('12.00'), event=self.event,
+                                       redeemed=1, min_usages=3, max_usages=10)
+            CartPosition.objects.create(
+                event=self.event, cart_id=self.session_key, item=self.ticket, voucher=v,
+                price=23, expires=now() + timedelta(minutes=10)
+            )
+            cp2 = CartPosition.objects.create(
+                event=self.event, cart_id=self.session_key, item=self.ticket, voucher=v,
+                price=23, expires=now() + timedelta(minutes=10)
+            )
+            cp3 = CartPosition.objects.create(
+                event=self.event, cart_id=self.session_key, item=self.ticket, voucher=v,
+                price=23, expires=now() + timedelta(minutes=10)
+            )
+        self.client.post('/%s/%s/cart/remove' % (self.orga.slug, self.event.slug), {
+            'id': cp3.pk
+        }, follow=True)
+        with scopes_disabled():
+            self.assertEqual(2, CartPosition.objects.filter(cart_id=self.session_key, event=self.event).count())
+        response = self.client.post('/%s/%s/cart/remove' % (self.orga.slug, self.event.slug), {
+            'id': cp2.pk
+        }, follow=True)
+        doc = BeautifulSoup(response.rendered_content, "lxml")
+        self.assertIn('at least 2', doc.select('.alert-danger')[0].text)
+        with scopes_disabled():
+            self.assertEqual(0, CartPosition.objects.filter(cart_id=self.session_key, event=self.event).count())
+
     def test_remove_min(self):
         self.ticket.min_per_order = 2
         self.ticket.save()
@@ -1364,7 +1537,7 @@ class CartTest(CartTestMixin, TestCase):
         response = self.client.get('/%s/%s/redeem' % (self.orga.slug, self.event.slug),
                                    {'voucher': v.code},
                                    follow=True)
-        assert error_messages['voucher_item_not_available'] in response.rendered_content
+        assert str(error_messages['voucher_item_not_available']) in response.rendered_content
 
     def test_voucher_price(self):
         with scopes_disabled():
@@ -1445,7 +1618,8 @@ class CartTest(CartTestMixin, TestCase):
         self.assertEqual(objs[0].item, self.ticket)
         self.assertIsNone(objs[0].variation)
         self.assertEqual(objs[0].price, Decimal('21.00'))
-        self.assertEqual(objs[0].price_before_voucher, Decimal('23.00'))
+        self.assertEqual(objs[0].listed_price, Decimal('23.00'))
+        self.assertEqual(objs[0].price_after_voucher, Decimal('20.70'))
 
     def test_voucher_free_price_before_voucher_cap(self):
         with scopes_disabled():
@@ -1470,7 +1644,8 @@ class CartTest(CartTestMixin, TestCase):
         self.assertEqual(objs[0].item, self.ticket)
         self.assertIsNone(objs[0].variation)
         self.assertEqual(objs[0].price, Decimal('41.00'))
-        self.assertEqual(objs[0].price_before_voucher, Decimal('41.00'))
+        self.assertEqual(objs[0].listed_price, Decimal('23.00'))
+        self.assertEqual(objs[0].price_after_voucher, Decimal('20.70'))
 
     def test_voucher_free_price_lower_bound(self):
         with scopes_disabled():
@@ -1495,7 +1670,8 @@ class CartTest(CartTestMixin, TestCase):
         self.assertEqual(objs[0].item, self.ticket)
         self.assertIsNone(objs[0].variation)
         self.assertEqual(objs[0].price, Decimal('20.70'))
-        self.assertEqual(objs[0].price_before_voucher, Decimal('23.00'))
+        self.assertEqual(objs[0].listed_price, Decimal('23.00'))
+        self.assertEqual(objs[0].price_after_voucher, Decimal('20.70'))
 
     def test_voucher_redemed(self):
         with scopes_disabled():
@@ -1610,6 +1786,27 @@ class CartTest(CartTestMixin, TestCase):
         with scopes_disabled():
             self.assertEqual(1, CartPosition.objects.filter(cart_id=self.session_key, event=self.event).count())
 
+    def test_voucher_min_usages(self):
+        with scopes_disabled():
+            v = Voucher.objects.create(item=self.ticket, value=Decimal('12.00'), event=self.event, redeemed=1,
+                                       min_usages=5, max_usages=10)
+        response = self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'item_%d' % self.ticket.id: '1',
+            '_voucher_code': v.code,
+        }, follow=True)
+        doc = BeautifulSoup(response.rendered_content, "lxml")
+        self.assertIn('select at least 4', doc.select('.alert-danger')[0].text)
+        with scopes_disabled():
+            self.assertFalse(CartPosition.objects.filter(cart_id=self.session_key, event=self.event).exists())
+        response = self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'item_%d' % self.ticket.id: '4',
+            '_voucher_code': v.code,
+        }, follow=True)
+        doc = BeautifulSoup(response.rendered_content, "lxml")
+        self.assertFalse(doc.select('.alert-danger'))
+        with scopes_disabled():
+            self.assertEqual(4, CartPosition.objects.filter(cart_id=self.session_key, event=self.event).count())
+
     def test_require_voucher(self):
         with scopes_disabled():
             v = Voucher.objects.create(quota=self.quota_shirts, event=self.event)
@@ -1678,6 +1875,44 @@ class CartTest(CartTestMixin, TestCase):
     def test_hide_without_voucher_failed(self):
         self.shirt.hide_without_voucher = True
         self.shirt.save()
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'variation_%d_%d' % (self.shirt.id, self.shirt_red.id): '1',
+        }, follow=True)
+        with scopes_disabled():
+            objs = list(CartPosition.objects.filter(cart_id=self.session_key, event=self.event))
+        self.assertEqual(len(objs), 0)
+
+    def test_variation_hide_without_voucher(self):
+        with scopes_disabled():
+            v = Voucher.objects.create(item=self.shirt, event=self.event)
+        self.shirt_red.hide_without_voucher = True
+        self.shirt_red.save()
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'variation_%d_%d' % (self.shirt.id, self.shirt_red.id): '1',
+            '_voucher_code': v.code
+        }, follow=True)
+        with scopes_disabled():
+            objs = list(CartPosition.objects.filter(cart_id=self.session_key, event=self.event))
+        self.assertEqual(len(objs), 1)
+        self.assertEqual(objs[0].item, self.shirt)
+        self.assertEqual(objs[0].variation, self.shirt_red)
+
+    def test_variation_hide_without_voucher_failed_because_of_voucher(self):
+        with scopes_disabled():
+            v = Voucher.objects.create(item=self.shirt, event=self.event, show_hidden_items=False)
+        self.shirt_red.hide_without_voucher = True
+        self.shirt_red.save()
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'variation_%d_%d' % (self.shirt.id, self.shirt_red.id): '1',
+            '_voucher_code': v.code
+        }, follow=True)
+        with scopes_disabled():
+            objs = list(CartPosition.objects.filter(cart_id=self.session_key, event=self.event))
+        self.assertEqual(len(objs), 0)
+
+    def test_variation_hide_without_voucher_failed(self):
+        self.shirt_red.hide_without_voucher = True
+        self.shirt_red.save()
         self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
             'variation_%d_%d' % (self.shirt.id, self.shirt_red.id): '1',
         }, follow=True)
@@ -1827,11 +2062,11 @@ class CartTest(CartTestMixin, TestCase):
         with scopes_disabled():
             cp1 = CartPosition.objects.create(
                 event=self.event, cart_id=self.session_key, item=self.ticket,
-                price=23, expires=now() + timedelta(minutes=10)
+                price=23, listed_price=23, price_after_voucher=23, expires=now() + timedelta(minutes=10)
             )
             cp2 = CartPosition.objects.create(
                 event=self.event, cart_id=self.session_key, item=self.shirt, variation=self.shirt_blue,
-                price=15, expires=now() + timedelta(minutes=10)
+                price=15, listed_price=15, price_after_voucher=15, expires=now() + timedelta(minutes=10)
             )
             v = Voucher.objects.create(
                 event=self.event, item=self.ticket, price_mode='set', value=Decimal('4.00')
@@ -1851,11 +2086,11 @@ class CartTest(CartTestMixin, TestCase):
         with scopes_disabled():
             cp1 = CartPosition.objects.create(
                 event=self.event, cart_id=self.session_key, item=self.ticket,
-                price=23, expires=now() + timedelta(minutes=10)
+                price=23, listed_price=23, price_after_voucher=23, expires=now() + timedelta(minutes=10)
             )
             cp2 = CartPosition.objects.create(
                 event=self.event, cart_id=self.session_key, item=self.shirt, variation=self.shirt_blue,
-                price=150, expires=now() + timedelta(minutes=10)
+                price=150, listed_price=150, price_after_voucher=150, expires=now() + timedelta(minutes=10)
             )
             v = Voucher.objects.create(
                 event=self.event, price_mode='set', value=Decimal('4.00'), max_usages=100, redeemed=99
@@ -1876,11 +2111,11 @@ class CartTest(CartTestMixin, TestCase):
         with scopes_disabled():
             cp1 = CartPosition.objects.create(
                 event=self.event, cart_id=self.session_key, item=self.ticket,
-                price=23, expires=now() + timedelta(minutes=10)
+                price=23, listed_price=23, price_after_voucher=23, expires=now() + timedelta(minutes=10)
             )
             cp2 = CartPosition.objects.create(
                 event=self.event, cart_id=self.session_key, item=self.shirt, variation=self.shirt_blue,
-                price=150, expires=now() + timedelta(minutes=10)
+                price=150, listed_price=150, price_after_voucher=150, expires=now() + timedelta(minutes=10)
             )
             v = Voucher.objects.create(
                 event=self.event, price_mode='set', quota=self.quota_all, value=Decimal('4.00'), max_usages=100
@@ -1897,18 +2132,57 @@ class CartTest(CartTestMixin, TestCase):
             assert cp2.voucher == v
             assert cp2.price == Decimal('4.00')
 
+    def test_voucher_apply_min_usages(self):
+        with scopes_disabled():
+            cp1 = CartPosition.objects.create(
+                event=self.event, cart_id=self.session_key, item=self.ticket,
+                price=23, listed_price=23, price_after_voucher=23, expires=now() + timedelta(minutes=10)
+            )
+            cp2 = CartPosition.objects.create(
+                event=self.event, cart_id=self.session_key, item=self.shirt, variation=self.shirt_blue,
+                price=150, listed_price=150, price_after_voucher=150, expires=now() + timedelta(minutes=10)
+            )
+            v = Voucher.objects.create(
+                event=self.event, price_mode='set', quota=self.quota_all, value=Decimal('4.00'), max_usages=100,
+                min_usages=4, redeemed=1
+            )
+        response = self.client.post('/%s/%s/cart/voucher' % (self.orga.slug, self.event.slug), {
+            'voucher': v.code,
+        }, follow=True)
+        assert 'alert-danger' in response.rendered_content
+        assert 'at least 3' in response.rendered_content
+        with scopes_disabled():
+            cp1.refresh_from_db()
+            cp2.refresh_from_db()
+            assert not cp1.voucher
+            assert not cp2.voucher
+
+        v.redeemed = 2
+        v.save()
+        response = self.client.post('/%s/%s/cart/voucher' % (self.orga.slug, self.event.slug), {
+            'voucher': v.code,
+        }, follow=True)
+        assert 'alert-success' in response.rendered_content
+        with scopes_disabled():
+            cp1.refresh_from_db()
+            cp2.refresh_from_db()
+            assert cp1.voucher == v
+            assert cp1.price == Decimal('4.00')
+            assert cp2.voucher == v
+            assert cp2.price == Decimal('4.00')
+
     def test_voucher_apply_only_one_per_line(self):
         with scopes_disabled():
             cp1 = CartPosition.objects.create(
                 event=self.event, cart_id=self.session_key, item=self.ticket,
-                price=23, expires=now() + timedelta(minutes=10)
+                price=23, listed_price=23, price_after_voucher=23, expires=now() + timedelta(minutes=10)
             )
             v2 = Voucher.objects.create(
-                event=self.event, price_mode='set', quota=self.quota_all, value=Decimal('4.00'), max_usages=100
+                event=self.event, price_mode='set', quota=self.quota_all, value=Decimal('8.00'), max_usages=100
             )
             cp2 = CartPosition.objects.create(
                 event=self.event, cart_id=self.session_key, item=self.shirt, variation=self.shirt_blue,
-                price=150, expires=now() + timedelta(minutes=10), voucher=v2
+                price=8, expires=now() + timedelta(minutes=10), voucher=v2
             )
             v = Voucher.objects.create(
                 event=self.event, price_mode='set', quota=self.quota_all, value=Decimal('4.00'), max_usages=100
@@ -1923,7 +2197,7 @@ class CartTest(CartTestMixin, TestCase):
             assert cp1.voucher == v
             assert cp1.price == Decimal('4.00')
             assert cp2.voucher == v2
-            assert cp2.price == Decimal('150.00')
+            assert cp2.price == Decimal('8.00')
 
     """
     def test_voucher_apply_only_positive(self):
@@ -1954,11 +2228,11 @@ class CartTest(CartTestMixin, TestCase):
         with scopes_disabled():
             cp1 = CartPosition.objects.create(
                 event=self.event, cart_id=self.session_key, item=self.ticket,
-                price=23, expires=now() + timedelta(minutes=10)
+                price=23, listed_price=23, price_after_voucher=23, expires=now() + timedelta(minutes=10)
             )
             cp2 = CartPosition.objects.create(
                 event=self.event, cart_id=self.session_key, item=self.shirt, variation=self.shirt_blue,
-                price=15, expires=now() + timedelta(minutes=10)
+                price=15, listed_price=15, price_after_voucher=15, expires=now() + timedelta(minutes=10)
             )
             v = Voucher.objects.create(
                 event=self.event, price_mode='set', value=Decimal('40.00'), max_usages=100,
@@ -1978,11 +2252,11 @@ class CartTest(CartTestMixin, TestCase):
         with scopes_disabled():
             cp1 = CartPosition.objects.create(
                 event=self.event, cart_id=self.session_key, item=self.ticket,
-                price=23, expires=now() + timedelta(minutes=10)
+                price=23, listed_price=23, price_after_voucher=23, expires=now() + timedelta(minutes=10)
             )
             cp2 = CartPosition.objects.create(
                 event=self.event, cart_id=self.session_key, item=self.shirt, variation=self.shirt_blue,
-                price=15, expires=now() + timedelta(minutes=10)
+                price=15, listed_price=15, price_after_voucher=15, expires=now() + timedelta(minutes=10)
             )
             v = Voucher.objects.create(
                 event=self.event, price_mode='set', value=Decimal('40.00'), max_usages=100, redeemed=100
@@ -1996,6 +2270,79 @@ class CartTest(CartTestMixin, TestCase):
             cp2.refresh_from_db()
             assert cp1.voucher is None
             assert cp2.voucher is None
+
+    def test_discount(self):
+        with scopes_disabled():
+            Discount.objects.create(event=self.event, condition_min_count=2, benefit_discount_matching_percent=20,
+                                    benefit_only_apply_to_cheapest_n_matches=1)
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'item_%d' % self.ticket.id: '1',
+        }, follow=True)
+        with scopes_disabled():
+            objs = list(CartPosition.objects.filter(cart_id=self.session_key, event=self.event))
+        self.assertEqual(len(objs), 1)
+        self.assertEqual(objs[0].item, self.ticket)
+        self.assertIsNone(objs[0].variation)
+        self.assertEqual(objs[0].price, 23)
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'item_%d' % self.ticket.id: '1',
+        }, follow=True)
+        with scopes_disabled():
+            objs = list(CartPosition.objects.filter(cart_id=self.session_key, event=self.event))
+        self.assertEqual(len(objs), 2)
+        self.assertEqual({objs[0].price, objs[1].price}, {Decimal('23.00'), Decimal('18.40')})
+
+    def test_discount_and_voucher_mixed(self):
+        with scopes_disabled():
+            Discount.objects.create(event=self.event, condition_min_count=2, benefit_discount_matching_percent=50,
+                                    benefit_only_apply_to_cheapest_n_matches=1)
+            v = Voucher.objects.create(
+                event=self.event, price_mode='set', value=Decimal('4.00'), max_usages=100
+            )
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'item_%d' % self.ticket.id: '1',
+            '_voucher_code': v.code,
+        }, follow=True)
+        with scopes_disabled():
+            objs = list(CartPosition.objects.filter(cart_id=self.session_key, event=self.event))
+        self.assertEqual(len(objs), 1)
+        self.assertEqual(objs[0].item, self.ticket)
+        self.assertIsNone(objs[0].variation)
+        self.assertEqual(objs[0].price, 4)
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'item_%d' % self.ticket.id: '1',
+            '_voucher_code': v.code,
+        }, follow=True)
+        with scopes_disabled():
+            objs = list(CartPosition.objects.filter(cart_id=self.session_key, event=self.event))
+        self.assertEqual(len(objs), 2)
+        self.assertEqual({objs[0].price, objs[1].price}, {Decimal('4.00'), Decimal('2.00')})
+
+    def test_discount_and_voucher_mix_forbidden(self):
+        with scopes_disabled():
+            Discount.objects.create(event=self.event, condition_min_count=2, benefit_discount_matching_percent=50,
+                                    benefit_only_apply_to_cheapest_n_matches=1, condition_ignore_voucher_discounted=True)
+            v = Voucher.objects.create(
+                event=self.event, price_mode='set', value=Decimal('4.00'), max_usages=100
+            )
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'item_%d' % self.ticket.id: '1',
+            '_voucher_code': v.code,
+        }, follow=True)
+        with scopes_disabled():
+            objs = list(CartPosition.objects.filter(cart_id=self.session_key, event=self.event))
+        self.assertEqual(len(objs), 1)
+        self.assertEqual(objs[0].item, self.ticket)
+        self.assertIsNone(objs[0].variation)
+        self.assertEqual(objs[0].price, 4)
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
+            'item_%d' % self.ticket.id: '1',
+            '_voucher_code': v.code,
+        }, follow=True)
+        with scopes_disabled():
+            objs = list(CartPosition.objects.filter(cart_id=self.session_key, event=self.event))
+        self.assertEqual(len(objs), 2)
+        self.assertEqual({objs[0].price, objs[1].price}, {Decimal('4.00'), Decimal('4.00')})
 
 
 class CartAddonTest(CartTestMixin, TestCase):
@@ -2018,7 +2365,8 @@ class CartAddonTest(CartTestMixin, TestCase):
         self.workshopquota.variations.add(self.workshop3a)
         self.workshopquota.variations.add(self.workshop3b)
         self.addon1 = ItemAddOn.objects.create(base_item=self.ticket, addon_category=self.workshopcat)
-        self.cm = CartManager(event=self.event, cart_id=self.session_key)
+        self.cm = CartManager(event=self.event, cart_id=self.session_key,
+                              sales_channel=self.orga.sales_channels.get(identifier="web"))
 
     @classscope(attr='orga')
     def test_cart_set_simple_addon_included(self):
@@ -2040,6 +2388,44 @@ class CartAddonTest(CartTestMixin, TestCase):
         cp2 = cp1.addons.first()
         assert cp2.item == self.workshop1
         assert cp2.price == 0
+
+    @classscope(attr='orga')
+    def test_extend_included_addon(self):
+        self.addon1.price_included = True
+        self.addon1.save()
+        cp1 = CartPosition.objects.create(
+            expires=now() - timedelta(minutes=10), item=self.ticket, price=Decimal('23.00'),
+            event=self.event, cart_id=self.session_key
+        )
+        cp2 = CartPosition.objects.create(
+            expires=now() - timedelta(minutes=10), item=self.workshop1, price=Decimal('0.00'),
+            event=self.event, cart_id=self.session_key, addon_to=cp1
+        )
+        self.cm.extend_expired_positions()
+        self.cm.commit()
+        cp2.refresh_from_db()
+        assert cp2.expires > now()
+        assert cp2.item == self.workshop1
+        assert cp2.price == 0
+
+    @classscope(attr='orga')
+    def test_extend_included_addon_no_longer_available(self):
+        self.addon1.price_included = True
+        self.addon1.save()
+        self.quota_tickets.size = 0
+        self.quota_tickets.save()
+        cp1 = CartPosition.objects.create(
+            expires=now() - timedelta(minutes=10), item=self.ticket, price=Decimal('23.00'),
+            event=self.event, cart_id=self.session_key
+        )
+        CartPosition.objects.create(
+            expires=now() - timedelta(minutes=10), item=self.workshop1, price=Decimal('0.00'),
+            event=self.event, cart_id=self.session_key, addon_to=cp1
+        )
+        self.cm.extend_expired_positions()
+        with self.assertRaises(CartError):
+            self.cm.commit()
+        assert CartPosition.objects.count() == 0
 
     @classscope(attr='orga')
     def test_cart_addon_remove_parent(self):
@@ -2303,7 +2689,7 @@ class CartAddonTest(CartTestMixin, TestCase):
         self.addon1.multi_allowed = True
         self.addon1.save()
 
-        self.cm = CartManager(event=self.event, cart_id=self.session_key)
+        self.cm = CartManager(event=self.event, cart_id=self.session_key, sales_channel=self.orga.sales_channels.get(identifier="web"))
         self.cm.set_addons([
             {
                 'addon_to': cp1.pk,
@@ -2317,7 +2703,7 @@ class CartAddonTest(CartTestMixin, TestCase):
         assert cp1.addons.count() == 3
         assert all(a.price == Decimal('24.00') for a in cp1.addons.all())
 
-        self.cm = CartManager(event=self.event, cart_id=self.session_key)
+        self.cm = CartManager(event=self.event, cart_id=self.session_key, sales_channel=self.orga.sales_channels.get(identifier="web"))
         self.cm.set_addons([
             {
                 'addon_to': cp1.pk,
@@ -2351,7 +2737,7 @@ class CartAddonTest(CartTestMixin, TestCase):
         self.cm.commit()
         assert cp1.addons.count() == 3
 
-        self.cm = CartManager(event=self.event, cart_id=self.session_key)
+        self.cm = CartManager(event=self.event, cart_id=self.session_key, sales_channel=self.orga.sales_channels.get(identifier="web"))
         self.cm.set_addons([
             {
                 'addon_to': cp1.pk,
@@ -2363,7 +2749,7 @@ class CartAddonTest(CartTestMixin, TestCase):
         self.cm.commit()
         assert cp1.addons.count() == 4
 
-        self.cm = CartManager(event=self.event, cart_id=self.session_key)
+        self.cm = CartManager(event=self.event, cart_id=self.session_key, sales_channel=self.orga.sales_channels.get(identifier="web"))
         self.cm.set_addons([
             {
                 'addon_to': cp1.pk,
@@ -2686,7 +3072,9 @@ class CartAddonTest(CartTestMixin, TestCase):
         self.cm.commit()
         cp1.refresh_from_db()
         assert cp1.expires > now()
-        assert cp1.price_before_voucher == Decimal('23.00')
+        assert cp1.listed_price == Decimal('23.00')
+        assert cp1.price_after_voucher == Decimal('20.00')
+        assert cp1.price == Decimal('20.00')
 
 
 class CartBundleTest(CartTestMixin, TestCase):
@@ -2703,7 +3091,7 @@ class CartBundleTest(CartTestMixin, TestCase):
             designated_price=1.5,
             count=1
         )
-        self.cm = CartManager(event=self.event, cart_id=self.session_key)
+        self.cm = CartManager(event=self.event, cart_id=self.session_key, sales_channel=self.orga.sales_channels.get(identifier="web"))
 
     @classscope(attr='orga')
     def test_simple_bundle(self):
@@ -2745,6 +3133,27 @@ class CartBundleTest(CartTestMixin, TestCase):
         assert a.price == 1.5
 
     @classscope(attr='orga')
+    def test_simple_bundled_voucher_all_free(self):
+        v = Voucher.objects.create(item=self.ticket, value=Decimal('0.00'), event=self.event, price_mode='set',
+                                   all_bundles_included=True)
+        self.cm.add_new_items([
+            {
+                'item': self.ticket.pk,
+                'variation': None,
+                'voucher': v.code,
+                'count': 1
+            }
+        ])
+        self.cm.commit()
+        cp = CartPosition.objects.get(addon_to__isnull=True)
+        assert cp.item == self.ticket
+        assert cp.price == 0
+        assert cp.addons.count() == 1
+        a = cp.addons.get()
+        assert a.item == self.trans
+        assert a.price == 0
+
+    @classscope(attr='orga')
     def test_voucher_on_base_product(self):
         v = self.event.vouchers.create(code="foo", item=self.ticket)
         self.cm.add_new_items([
@@ -2761,7 +3170,8 @@ class CartBundleTest(CartTestMixin, TestCase):
         assert cp.price == 23 - 1.5
         assert cp.addons.count() == 1
         assert cp.voucher == v
-        assert cp.price_before_voucher == 23 - 1.5
+        assert cp.listed_price == 23
+        assert cp.price_after_voucher == 23
         a = cp.addons.get()
         assert a.item == self.trans
         assert a.price == 1.5
@@ -2784,7 +3194,8 @@ class CartBundleTest(CartTestMixin, TestCase):
         assert cp.price == 23 - 1.5 - 1.5
         assert cp.addons.count() == 1
         assert cp.voucher == v
-        assert cp.price_before_voucher == 23 - 1.5
+        assert cp.listed_price == 23
+        assert cp.price_after_voucher == 23 - 1.5
         a = cp.addons.get()
         assert a.item == self.trans
         assert a.price == 1.5
@@ -3071,13 +3482,11 @@ class CartBundleTest(CartTestMixin, TestCase):
         assert cp.tax_rate == Decimal('19.00')
         assert cp.tax_value == Decimal('3.43')
         assert cp.addons.count() == 1
-        assert cp.includes_tax
         a = cp.addons.first()
         assert a.item == self.trans
         assert a.price == 1.5
         assert a.tax_rate == Decimal('7.00')
         assert a.tax_value == Decimal('0.10')
-        assert a.includes_tax
 
     @classscope(attr='orga')
     def test_one_bundled_one_addon(self):
@@ -3102,7 +3511,7 @@ class CartBundleTest(CartTestMixin, TestCase):
         b = cp.addons.first()
         assert b.item == self.trans
 
-        self.cm = CartManager(event=self.event, cart_id=self.session_key)
+        self.cm = CartManager(event=self.event, cart_id=self.session_key, sales_channel=self.orga.sales_channels.get(identifier="web"))
         self.cm.set_addons([
             {
                 'addon_to': cp.pk,
@@ -3211,6 +3620,87 @@ class CartBundleTest(CartTestMixin, TestCase):
         assert b.price == Decimal('1.50')
 
     @classscope(attr='orga')
+    def test_voucher_apply_multiple_reduce_beyond_designated_price_no_tax_rules(self):
+        self.ticket.tax_rule = None
+        self.ticket.save()
+        self.trans.tax_rule = None
+        self.trans.save()
+        cp = CartPosition.objects.create(
+            event=self.event, cart_id=self.session_key, item=self.ticket,
+            price=21.5, expires=now() + timedelta(minutes=10)
+        )
+        b = CartPosition.objects.create(
+            event=self.event, cart_id=self.session_key, item=self.trans, addon_to=cp,
+            price=1.5, expires=now() + timedelta(minutes=10), is_bundled=True
+        )
+        v = Voucher.objects.create(
+            event=self.event, price_mode='set', value=Decimal('0.00'), max_usages=100
+        )
+
+        self.cm.apply_voucher(v.code)
+        self.cm.commit()
+        cp.refresh_from_db()
+        b.refresh_from_db()
+        assert cp.price == Decimal('0.00')
+        assert b.price == Decimal('1.50')
+
+    @classscope(attr='orga')
+    def test_voucher_apply_affect_bundled(self):
+        cp = CartPosition.objects.create(
+            event=self.event, cart_id=self.session_key, item=self.ticket,
+            price=21.5, expires=now() + timedelta(minutes=10)
+        )
+        a = CartPosition.objects.create(
+            event=self.event, cart_id=self.session_key, item=self.trans, addon_to=cp,
+            price=2.5, expires=now() + timedelta(minutes=10), is_bundled=False
+        )
+        b = CartPosition.objects.create(
+            event=self.event, cart_id=self.session_key, item=self.trans, addon_to=cp,
+            price=1.5, expires=now() + timedelta(minutes=10), is_bundled=True
+        )
+        v = Voucher.objects.create(
+            event=self.event, price_mode='set', value=Decimal('0.00'), max_usages=100,
+            all_bundles_included=True, all_addons_included=False, item=self.ticket,
+        )
+
+        self.cm.apply_voucher(v.code)
+        self.cm.commit()
+        cp.refresh_from_db()
+        b.refresh_from_db()
+        a.refresh_from_db()
+        assert cp.price == Decimal('0.00')
+        assert a.price == Decimal('2.50')
+        assert b.price == Decimal('0.00')
+
+    @classscope(attr='orga')
+    def test_voucher_apply_affect_addons(self):
+        cp = CartPosition.objects.create(
+            event=self.event, cart_id=self.session_key, item=self.ticket,
+            price=21.5, expires=now() + timedelta(minutes=10)
+        )
+        a = CartPosition.objects.create(
+            event=self.event, cart_id=self.session_key, item=self.trans, addon_to=cp,
+            price=1.5, expires=now() + timedelta(minutes=10), is_bundled=False
+        )
+        b = CartPosition.objects.create(
+            event=self.event, cart_id=self.session_key, item=self.trans, addon_to=cp,
+            price=1.5, expires=now() + timedelta(minutes=10), is_bundled=True
+        )
+        v = Voucher.objects.create(
+            event=self.event, price_mode='set', value=Decimal('0.00'), max_usages=100,
+            all_addons_included=True, all_bundles_included=False,
+        )
+
+        self.cm.apply_voucher(v.code)
+        self.cm.commit()
+        cp.refresh_from_db()
+        b.refresh_from_db()
+        a.refresh_from_db()
+        assert cp.price == Decimal('0.00')
+        assert a.price == Decimal('0.00')
+        assert b.price == Decimal('1.50')
+
+    @classscope(attr='orga')
     def test_extend_base_price_changed(self):
         cp = CartPosition.objects.create(
             event=self.event, cart_id=self.session_key, item=self.ticket,
@@ -3271,15 +3761,14 @@ class CartBundleTest(CartTestMixin, TestCase):
             event=self.event, cart_id=self.session_key, item=self.trans, addon_to=cp,
             price=1.5, expires=now() - timedelta(minutes=10), is_bundled=True
         )
-        update_tax_rates(self.event, self.session_key, ia)
+        self.cm.invoice_address = ia
+        self.cm.recompute_final_prices_and_taxes()
         cp.refresh_from_db()
         a.refresh_from_db()
         assert cp.price == Decimal('21.50')
         assert cp.tax_rate == Decimal('19.00')
-        assert cp.includes_tax
         assert a.price == Decimal('1.40')
         assert a.tax_rate == Decimal('0.00')
-        assert not a.includes_tax
 
         self.cm.invoice_address = ia
         self.cm.commit()
@@ -3288,10 +3777,8 @@ class CartBundleTest(CartTestMixin, TestCase):
         a.refresh_from_db()
         assert cp.price == Decimal('21.50')
         assert cp.tax_rate == Decimal('19.00')
-        assert cp.includes_tax
         assert a.price == Decimal('1.40')
         assert a.tax_rate == 0
-        assert not a.includes_tax
 
     @classscope(attr='orga')
     def test_expired_reverse_charge_all(self):
@@ -3314,15 +3801,14 @@ class CartBundleTest(CartTestMixin, TestCase):
             event=self.event, cart_id=self.session_key, item=self.trans, addon_to=cp,
             price=1.5, expires=now() - timedelta(minutes=10), is_bundled=True
         )
-        update_tax_rates(self.event, self.session_key, ia)
+        self.cm.invoice_address = ia
+        self.cm.recompute_final_prices_and_taxes()
         cp.refresh_from_db()
         a.refresh_from_db()
         assert cp.price == Decimal('18.07')
         assert cp.tax_rate == Decimal('0.00')
-        assert not cp.includes_tax
         assert a.price == Decimal('1.40')
         assert a.tax_rate == Decimal('0.00')
-        assert not a.includes_tax
 
         self.cm.invoice_address = ia
         self.cm.commit()
@@ -3331,10 +3817,8 @@ class CartBundleTest(CartTestMixin, TestCase):
         a.refresh_from_db()
         assert cp.price == Decimal('18.07')
         assert cp.tax_rate == Decimal('0.00')
-        assert not cp.includes_tax
         assert a.price == Decimal('1.40')
         assert a.tax_rate == Decimal('0.00')
-        assert not a.includes_tax
 
     @classscope(attr='orga')
     def test_reverse_charge_all_add(self):
@@ -3363,10 +3847,39 @@ class CartBundleTest(CartTestMixin, TestCase):
         a = CartPosition.objects.filter(addon_to__isnull=False).get()
         assert cp.price == Decimal('18.07')
         assert cp.tax_rate == Decimal('0.00')
-        assert not cp.includes_tax
         assert a.price == Decimal('1.40')
         assert a.tax_rate == Decimal('0.00')
-        assert not a.includes_tax
+
+    @classscope(attr='orga')
+    def test_reverse_charge_bundled_add_keep_gross_price(self):
+        ia = InvoiceAddress.objects.create(
+            is_business=True, vat_id='ATU1234567', vat_id_validated=True,
+            country=Country('AT')
+        )
+        tr19 = self.event.tax_rules.create(name='VAT', rate=Decimal('19.00'))
+        tr7 = self.event.tax_rules.create(name='VAT', rate=Decimal('7.00'), eu_reverse_charge=True, home_country=Country('DE'),
+                                          keep_gross_if_rate_changes=True)
+        self.ticket.tax_rule = tr19
+        self.ticket.save()
+        self.trans.tax_rule = tr7
+        self.trans.save()
+
+        self.cm.invoice_address = ia
+        self.cm.add_new_items([
+            {
+                'item': self.ticket.pk,
+                'variation': None,
+                'count': 1
+            }
+        ])
+        self.cm.commit()
+
+        cp = CartPosition.objects.filter(addon_to__isnull=True).get()
+        a = CartPosition.objects.filter(addon_to__isnull=False).get()
+        assert cp.price == Decimal('21.50')
+        assert cp.tax_rate == Decimal('19.00')
+        assert a.price == Decimal('1.50')
+        assert a.tax_rate == Decimal('0.00')
 
     @classscope(attr='orga')
     def test_reverse_charge_bundled_add(self):
@@ -3395,10 +3908,8 @@ class CartBundleTest(CartTestMixin, TestCase):
         a = CartPosition.objects.filter(addon_to__isnull=False).get()
         assert cp.price == Decimal('21.50')
         assert cp.tax_rate == Decimal('19.00')
-        assert cp.includes_tax
         assert a.price == Decimal('1.40')
         assert a.tax_rate == Decimal('0.00')
-        assert not a.includes_tax
 
     @classscope(attr='orga')
     def test_expired_country_taxing_only_bundled(self):
@@ -3423,17 +3934,16 @@ class CartBundleTest(CartTestMixin, TestCase):
         )
         a = CartPosition.objects.create(
             event=self.event, cart_id=self.session_key, item=self.trans, addon_to=cp,
-            price=1.47, expires=now() - timedelta(minutes=10), is_bundled=True, override_tax_rate=Decimal('5.00')
+            price=1.47, expires=now() - timedelta(minutes=10), is_bundled=True, tax_rate=Decimal('5.00')
         )
-        update_tax_rates(self.event, self.session_key, ia)
+        self.cm.invoice_address = ia
+        self.cm.recompute_final_prices_and_taxes()
         cp.refresh_from_db()
         a.refresh_from_db()
         assert cp.price == Decimal('21.50')
         assert cp.tax_rate == Decimal('19.00')
-        assert cp.includes_tax
         assert a.price == Decimal('1.47')
         assert a.tax_rate == Decimal('5.00')
-        assert a.includes_tax
 
         self.cm.invoice_address = ia
         self.cm.commit()
@@ -3442,10 +3952,8 @@ class CartBundleTest(CartTestMixin, TestCase):
         a.refresh_from_db()
         assert cp.price == Decimal('21.50')
         assert cp.tax_rate == Decimal('19.00')
-        assert cp.includes_tax
         assert a.price == Decimal('1.47')
         assert a.tax_rate == Decimal('5.00')
-        assert a.includes_tax
 
     @classscope(attr='orga')
     def test_expired_country_tax_all(self):
@@ -3471,21 +3979,20 @@ class CartBundleTest(CartTestMixin, TestCase):
 
         cp = CartPosition.objects.create(
             event=self.event, cart_id=self.session_key, item=self.ticket,
-            price=21.68, expires=now() - timedelta(minutes=10), override_tax_rate=Decimal('20.00')
+            price=21.68, expires=now() - timedelta(minutes=10), tax_rate=Decimal('20.00')
         )
         a = CartPosition.objects.create(
             event=self.event, cart_id=self.session_key, item=self.trans, addon_to=cp,
-            price=1.47, expires=now() - timedelta(minutes=10), is_bundled=True, override_tax_rate=Decimal('5.00')
+            price=1.47, expires=now() - timedelta(minutes=10), is_bundled=True, tax_rate=Decimal('5.00')
         )
-        update_tax_rates(self.event, self.session_key, ia)
+        self.cm.invoice_address = ia
+        self.cm.recompute_final_prices_and_taxes()
         cp.refresh_from_db()
         a.refresh_from_db()
         assert cp.price == Decimal('21.68')
         assert cp.tax_rate == Decimal('20.00')
-        assert cp.includes_tax
         assert a.price == Decimal('1.47')
         assert a.tax_rate == Decimal('5.00')
-        assert a.includes_tax
 
         self.cm.invoice_address = ia
         self.cm.commit()
@@ -3494,10 +4001,8 @@ class CartBundleTest(CartTestMixin, TestCase):
         a.refresh_from_db()
         assert cp.price == Decimal('21.68')
         assert cp.tax_rate == Decimal('20.0')
-        assert cp.includes_tax
         assert a.price == Decimal('1.47')
         assert a.tax_rate == Decimal('5.00')
-        assert a.includes_tax
 
     @classscope(attr='orga')
     def test_country_tax_all_add(self):
@@ -3535,10 +4040,8 @@ class CartBundleTest(CartTestMixin, TestCase):
         a = CartPosition.objects.filter(addon_to__isnull=False).get()
         assert cp.price == Decimal('21.68')
         assert cp.tax_rate == Decimal('20.00')
-        assert cp.includes_tax
         assert a.price == Decimal('1.47')
         assert a.tax_rate == Decimal('5.00')
-        assert a.includes_tax
 
     @classscope(attr='orga')
     def test_country_tax_bundled_add(self):
@@ -3571,10 +4074,8 @@ class CartBundleTest(CartTestMixin, TestCase):
         a = CartPosition.objects.filter(addon_to__isnull=False).get()
         assert cp.price == Decimal('21.50')
         assert cp.tax_rate == Decimal('19.00')
-        assert cp.includes_tax
         assert a.price == Decimal('1.47')
         assert a.tax_rate == Decimal('5.00')
-        assert a.includes_tax
 
 
 class CartSeatingTest(CartTestMixin, TestCase):
@@ -3591,7 +4092,7 @@ class CartSeatingTest(CartTestMixin, TestCase):
         self.seat_a1 = self.event.seats.create(seat_number="A1", product=self.ticket, seat_guid="A1")
         self.seat_a2 = self.event.seats.create(seat_number="A2", product=self.ticket, seat_guid="A2")
         self.seat_a3 = self.event.seats.create(seat_number="A3", product=self.ticket, seat_guid="A3")
-        self.cm = CartManager(event=self.event, cart_id=self.session_key)
+        self.cm = CartManager(event=self.event, cart_id=self.session_key, sales_channel=self.orga.sales_channels.get(identifier="web"))
 
     def test_add_with_seat_without_variation(self):
         self.client.post('/%s/%s/cart/add' % (self.orga.slug, self.event.slug), {
