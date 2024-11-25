@@ -660,7 +660,9 @@ def check_billing_status_for_warning(self):
                 invoice.status = BillingInvoice.STATUS_EXPIRED
                 invoice.reminder_enabled = False
                 invoice.save()
-                # TODO: move event's status to non-public
+                # Move event's status to non-public
+                invoice.event.live = False
+                invoice.event.save()
                 continue
             for reminder_date in reminder_dates:
                 reminder_date = datetime(today.year, today.month, reminder_date)
@@ -694,7 +696,7 @@ def check_billing_status_for_warning(self):
                         f"and is due for payment soon. We value your prompt attention to this matter "
                         f"to ensure continued service without interruption.\n\n"
                         f"Invoice Details:\n"
-                        f"- Invoice Date: {invoice.monthly_bill}\n"
+                        f"- Invoice Date: {invoice.monthly_bill + relativedelta(months=1)}\n"
                         f"- Due Date: {invoice.created_at + relativedelta(months=1)} \n"
                         f"- Total Amount Due: {invoice.ticket_fee} {invoice.currency}\n\n"
                         f"If you have already made the payment, please disregard this notice. "
